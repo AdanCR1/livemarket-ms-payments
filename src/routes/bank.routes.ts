@@ -54,6 +54,17 @@ bankRoutes.post(
             return c.json({ success: false, error: error.message }, 409);
         }
 
+        // 3. Registrar la transacción inicial en el ledger (si hubo saldo inicial)
+        if (initial_balance > 0) {
+            await supabase.from('bank_transactions').insert({
+                account_id: data.id,
+                tx_type: 'DEPOSIT',
+                amount: initial_balance,
+                balance_after: initial_balance,
+                description: 'Depósito inicial de apertura de cuenta',
+            });
+        }
+
         return c.json({ success: true, data }, 201);
     }
 );
@@ -74,6 +85,64 @@ bankRoutes.get('/account', async (c) => {
     }
 
     return c.json({ success: true, data });
+});
+
+// ─── GET /transactions (Historial de movimientos de MI cuenta) ───────────────
+bankRoutes.get('/transactions', async (c) => {
+    const actor = c.get('actor');
+    const supabase = createSupabaseAdmin(c.env);
+
+    // 1. Resolver la cuenta del actor autenticado
+    const { data: acc } = await supabase
+        .from('bank_accounts')
+        .select('id')
+        .eq('owner_user_id', actor.id)
+        .single();
+
+    if (!acc) {
+        return c.json({ success: false, error: 'Cuenta bancaria no encontrada' }, 404);
+    }
+
+    // 2. Paginación opcional (?limit=50&offset=0)
+    const rawLimit = Number(c.req.query('limit') ?? 50);
+    const rawOffset = Number(c.req.query('offset') ?? 0);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+    const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+
+    // 3. Consulta filtrada SOLO por la cuenta del actor (obligatorio con service_role)
+    const { data, error } = await supabase
+        .from('bank_transactions')
+        .select('id, account_id, tx_type, amount, balance_after, description, reference_id, created_at')
+        .eq('account_id', acc.id)
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1);
+
+    if (error) {
+        return c.json({ success: false, error: error.message }, 500);
+    }
+
+    // 4. Derivar dirección. Whitelist de tipos que RESTAN saldo.
+    //    Cualquier otro tipo se considera CREDIT.
+    const DEBIT_TYPES = new Set<string>([
+        'PURCHASE_PAYMENT',
+        'SUBSCRIPTION_FEE',
+        'TRANSFER_OUT',
+        'WITHDRAWAL',
+        'ESCROW_HOLD',
+    ]);
+
+    const mapped = (data ?? []).map((tx) => ({
+        id: tx.id,
+        tx_type: tx.tx_type,
+        direction: DEBIT_TYPES.has(tx.tx_type as string) ? 'DEBIT' : 'CREDIT',
+        amount: Number(tx.amount),
+        balance_after: Number(tx.balance_after),
+        description: tx.description,
+        reference_id: tx.reference_id,
+        created_at: tx.created_at,
+    }));
+
+    return c.json({ success: true, data: mapped });
 });
 
 // ─── POST /account/topup (Recargar saldo ficticio) ───────────────────────────
@@ -115,8 +184,7 @@ bankRoutes.post(
     }
 );
 
-// Transferencias entre cuentas mediante QR fijo
-
+// ─── POST /transfer-direct (Transferencias entre cuentas mediante QR fijo) ──
 bankRoutes.post(
   '/transfer-direct',
   zValidator(

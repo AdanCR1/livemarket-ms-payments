@@ -165,6 +165,29 @@ Recarga el saldo ficticio.
    de esa RPC en Supabase.
 4. Devuelve el resultado de la RPC; sus errores se responden con `400`.
 
+#### `POST /api/bank/transfer-direct`
+
+Transfiere saldo desde la cuenta del actor hacia otra cuenta bancaria simulada.
+
+**JSON**
+
+| Campo | Tipo | Reglas |
+|---|---|---|
+| `target_account_id` | string | UUID de la cuenta destino. |
+| `amount` | number | Positivo. |
+| `pin` | string | De 4 a 6 caracteres; la validación HTTP solo exige longitud. |
+
+**Algoritmo**
+
+1. Busca la cuenta origen asociada al actor autenticado; responde `404` si no existe.
+2. Busca la cuenta destino por `id`; responde `404` si no existe.
+3. Rechaza la transferencia si la cuenta origen y destino son la misma, con `400`.
+4. Verifica que el saldo origen sea suficiente; si no, responde `400` con
+   `Fondos insuficientes`.
+5. Calcula los nuevos saldos, actualiza ambas cuentas y registra dos movimientos
+   en `bank_transactions` (débito y crédito).
+6. Devuelve `200` con el monto transferido, el saldo restante y la cuenta destino.
+
 ### Pagos QR — `/api/qr`
 
 Todas estas rutas requieren JWT.
