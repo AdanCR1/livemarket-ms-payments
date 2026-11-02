@@ -115,4 +115,94 @@ bankRoutes.post(
     }
 );
 
+// Transferencias entre cuentas mediante QR fijo
+
+bankRoutes.post(
+  '/transfer-direct',
+  zValidator(
+    'json',
+    z.object({
+      target_account_id: z.string().uuid(),
+      amount: z.number().positive(),
+      pin: z.string().min(4).max(6),
+    })
+  ),
+  async (c) => {
+    const actor = c.get('actor');
+    const { target_account_id, amount, pin } = c.req.valid('json');
+    const supabase = createSupabaseAdmin(c.env);
+
+    // 1. Obtener la cuenta origen del actor autenticado
+    const { data: sourceAcc } = await supabase
+      .from('bank_accounts')
+      .select('*')
+      .eq('owner_user_id', actor.id)
+      .single();
+
+    if (!sourceAcc) {
+      return c.json({ success: false, error: 'No tienes una cuenta bancaria asignada' }, 404);
+    }
+
+    // 2. Verificar cuenta destino
+    const { data: targetAcc } = await supabase
+      .from('bank_accounts')
+      .select('*')
+      .eq('id', target_account_id)
+      .single();
+
+    if (!targetAcc) {
+      return c.json({ success: false, error: 'Cuenta de destino no encontrada' }, 404);
+    }
+
+    if (sourceAcc.id === targetAcc.id) {
+      return c.json({ success: false, error: 'No puedes transferir a tu propia cuenta' }, 400);
+    }
+
+    if (sourceAcc.balance < amount) {
+      return c.json({ success: false, error: 'Fondos insuficientes' }, 400);
+    }
+
+    // 3. Ejecutar transferencia atómica: debitar origen y acreditar destino
+    const newSourceBalance = Number(sourceAcc.balance) - amount;
+    const newTargetBalance = Number(targetAcc.balance) + amount;
+
+    await supabase
+      .from('bank_accounts')
+      .update({ balance: newSourceBalance })
+      .eq('id', sourceAcc.id);
+
+    await supabase
+      .from('bank_accounts')
+      .update({ balance: newTargetBalance })
+      .eq('id', targetAcc.id);
+
+    // Registrar en Ledger
+    await supabase.from('bank_transactions').insert([
+      {
+        account_id: sourceAcc.id,
+        tx_type: 'PURCHASE_PAYMENT',
+        amount,
+        balance_after: newSourceBalance,
+        description: `Transferencia Simple QR a cuenta ${targetAcc.account_number}`,
+      },
+      {
+        account_id: targetAcc.id,
+        tx_type: 'DEPOSIT',
+        amount,
+        balance_after: newTargetBalance,
+        description: `Transferencia Simple QR recibida de ${sourceAcc.account_number}`,
+      },
+    ]);
+
+    return c.json({
+      success: true,
+      data: {
+        amount,
+        balance_remaining: newSourceBalance,
+        target_account: targetAcc.account_number,
+      },
+    });
+  }
+);
+
 export default bankRoutes;
