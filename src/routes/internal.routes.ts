@@ -25,88 +25,79 @@ internalRoutes.post('/expire', async (c) => {
   return c.json({ success: true, data });
 });
 
-// ─── POST /process-outbox ─────────────────────────────────────────────────────
-internalRoutes.post('/process-outbox', async (c) => {
-  const supabase = createSupabaseAdmin(c.env);
+// ─── POST /process-outbox (claim atómico, sin envíos duplicados en paralelo) ───
+internalRoutes.post('/process-outbox',async c=>{
+ const supabase=createSupabaseAdmin(c.env);
+ const {data:events,error:claimError}=await supabase.rpc('ms6_claim_payment_events',{p_limit:20});
+ if(claimError)return c.json({success:false,error:'No se pudo reclamar outbox'},500);
+ let sent=0,failed=0;
+ for(const ev of events??[]){
+   let ok=false;let lastError='';
+   try{
+     // MS1 queda pendiente hasta integrar un endpoint autenticado para SUBSCRIPTION_CHANGED.
+     if(ev.destination==='MS4' && ev.event_type==='PAYMENT_SUCCEEDED'){
+       // Nunca confirmar pedido si el pago aún carece de custodia.
+       const {data:escrow}=await supabase.from('escrow_settlements').select('id')
+         .eq('payment_id',ev.aggregate_id).maybeSingle();
+       if(!escrow) throw new Error('ESCROW_PENDING_RECONCILIATION');
+       const r=await fetch(`${c.env.MS4_URL.replace(/\/+$/,'')}/api/internal/payments/events`,{
+         method:'POST',headers:{'Content-Type':'application/json','X-Internal-Key':c.env.PAYMENTS_INTERNAL_KEY},
+         body:JSON.stringify(ev.payload),signal:AbortSignal.timeout(8000)
+       });ok=r.ok; if(!ok)lastError=`MS4 HTTP ${r.status}`;
+     } else lastError=`Destino no configurado: ${ev.destination}/${ev.event_type}`;
+   }catch(e){lastError=e instanceof Error?e.message:'Error de red';}
+   const {error:ackError}=await supabase.rpc('ms6_ack_payment_event',{
+     p_event_id:ev.id,p_success:ok,p_error:lastError
+   });
+   if(ackError)console.error('No fue posible confirmar evento',ev.id);
+   if(ok)sent++;else failed++;
+ }
+ return c.json({success:true,claimed:(events??[]).length,sent,failed});
+});
 
-  const { data: pendingEvents, error } = await supabase
-    .from('payment_outbox')
-    .select('*')
-    .in('status', ['PENDING', 'FAILED'])
-    .lte('next_retry_at', new Date().toISOString())
-    .limit(20);
-
-  if (error || !pendingEvents || pendingEvents.length === 0) {
-    return c.json({ success: true, processed: 0 });
-  }
-
-  let processedCount = 0;
-
-  for (const ev of pendingEvents) {
-    try {
-      if (ev.destination === 'MS4' && ev.event_type === 'PAYMENT_SUCCEEDED') {
-        const res = await fetch(`${c.env.MS4_URL.replace(/\/$/, '')}/api/internal/payments/events`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Internal-Key': c.env.PAYMENTS_INTERNAL_KEY,
-          },
-          body: JSON.stringify(ev.payload),
-        });
-
-        if (res.ok) {
-          await supabase
-            .from('payment_outbox')
-            .update({ status: 'SENT', sent_at: new Date().toISOString() })
-            .eq('id', ev.id);
-          processedCount++;
-        } else {
-          throw new Error(`HTTP ${res.status}`);
-        }
-      }
-    } catch (err: any) {
-      await supabase
-        .from('payment_outbox')
-        .update({
-          status: 'FAILED',
-          attempts: ev.attempts + 1,
-          next_retry_at: new Date(Date.now() + Math.pow(2, ev.attempts + 1) * 60000).toISOString(),
-          last_error: err.message,
-        })
-        .eq('id', ev.id);
-    }
-  }
-
-  return c.json({ success: true, processed: processedCount });
+// Repara pagos ya procesados que quedaron sin escrow por caída tras el RPC.
+// No cobra nuevamente ni cambia el estado del pedido.
+internalRoutes.post('/escrow/reconcile-paid',async c=>{
+ const supabase=createSupabaseAdmin(c.env);
+ const {data:payments,error}=await supabase.from('payments')
+    .select('id,reference_id,target_store_id,payer_account_id,amount,currency')
+    .eq('purpose','ORDER_PAYMENT').eq('status','PAID')
+    .order('paid_at',{ascending:false}).limit(50);
+ if(error)return c.json({success:false,error:'No se pudo consultar pagos'},500);
+ let repaired=0,failed=0;
+ for(const p of payments??[]){
+  const {data:existing}=await supabase.from('escrow_settlements').select('id')
+    .eq('payment_id',p.id).maybeSingle();
+  if(existing)continue;
+  // La identidad del comprador se consulta en MS4; puede ser distinta del pagador.
+  let customerId:string|null=null;
+  try {
+    const response=await fetch(`${c.env.MS4_URL.replace(/\/+$/,'')}/api/internal/orders/${p.reference_id}/payment-quote`,{
+      headers:{'X-Internal-Key':c.env.PAYMENTS_INTERNAL_KEY},signal:AbortSignal.timeout(8000)
+    });
+    if(response.ok){const quote:any=await response.json(); customerId=quote?.data?.customer_id??null;}
+  }catch{ /* reintento programado */ }
+  if(!customerId){failed++;continue;}
+  const {error:insertError}=await supabase.from('escrow_settlements').insert({
+    payment_id:p.id,order_id:p.reference_id,store_id:p.target_store_id,
+    customer_id:customerId,amount:p.amount,currency:p.currency,status:'HELD'
+  });
+  if(insertError){failed++;console.error('Reparación escrow falló',p.id,insertError.message);}
+  else repaired++;
+ }
+ return c.json({success:true,checked:(payments??[]).length,repaired,failed});
 });
 
 // ─── POST /escrow/delivered ───────────────────────────────────────────────────
-internalRoutes.post('/escrow/delivered', async (c) => {
-  const body = await c.req.json().catch(() => null);
-  if (!body?.order_id) {
-    return c.json({ success: false, error: 'order_id requerido' }, 400);
-  }
-
-  const supabase = createSupabaseAdmin(c.env);
-  const minutes = body.timer_minutes || 5;
-
-  const { data, error } = await supabase.rpc('start_escrow_timer', {
-    p_order_id: body.order_id,
-    p_minutes: minutes,
-  });
-
-  if (error || !data.success) {
-    return c.json({ success: false, error: error?.message || data?.error }, 400);
-  }
-
-  return c.json({ success: true, data });
-});
+internalRoutes.post('/escrow/delivered', c => c.json({
+  success: false, error: 'El evento de llegada no acredita recepción'
+}, 503));
 
 // ─── POST /escrow/dispute ─────────────────────────────────────────────────────
 internalRoutes.post('/escrow/dispute', async (c) => {
   const body = await c.req.json().catch(() => null);
-  if (!body?.order_id || !body?.action) {
-    return c.json({ success: false, error: 'order_id y action requeridos' }, 400);
+  if (typeof body?.order_id !== 'string' || body?.action !== 'FREEZE') {
+    return c.json({ success: false, error: 'Se requiere order_id y acción FREEZE' }, 400);
   }
 
   const supabase = createSupabaseAdmin(c.env);
@@ -116,7 +107,7 @@ internalRoutes.post('/escrow/dispute', async (c) => {
     p_notes: body.reason || 'Disputa reportada por el comprador',
   });
 
-  if (error || !data.success) {
+  if (error || !data?.success) {
     return c.json({ success: false, error: error?.message || data?.error }, 400);
   }
 
@@ -125,6 +116,9 @@ internalRoutes.post('/escrow/dispute', async (c) => {
 
 // ─── POST /escrow/process-settlements ─────────────────────────────────────────
 internalRoutes.post('/escrow/process-settlements', async (c) => {
+  if (c.env.ESCROW_AUTO_SETTLEMENT_VERIFIED !== 'true') {
+    return c.json({ success: false, error: 'Liquidación automática deshabilitada' }, 503);
+  }
   const supabase = createSupabaseAdmin(c.env);
 
   const { data: readyOrders, error } = await supabase

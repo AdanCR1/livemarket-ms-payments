@@ -414,3 +414,35 @@ pago y el procesamiento del outbox son flujos separados.
 - Este repositorio no incluye las migraciones, definiciones SQL, políticas RLS
   ni la aplicación MS4. Los detalles internos de esas piezas deben verificarse
   en sus repositorios/configuraciones respectivos.
+## Consulta de suscripciones MarketCloud
+
+`src/index.ts` monta el router existente `src/routes/subscriptions.routes.ts`. Antes, ambas rutas devolvían 404. Ahora GET `/api/subscriptions/me` y GET `/api/subscriptions/payments/:id` usan Bearer JWT HS256 de MS1 y no reciben cuerpo. Solo B2B con tienda puede consultar su suscripción y pagos de upgrade de esa tienda. La consulta por ID filtra por tienda y propósito en Supabase.
+
+- Plan devuelve `{"success":true,"data":{"store_id":"<UUID>","plan":"FREE","status":"INACTIVE","can_accept_orders":false,"prices":{"PRO":null,"ENTERPRISE":null},"currency":"BOB","period_days":30}}`, más las fechas de vigencia.
+- Pago devuelve `{"success":true,"data":{"id":"<UUID>","purpose":"SUBSCRIPTION_UPGRADE","reference_id":"<TIENDA>","requested_plan":"PRO","status":"PAID","amount":"<BOB>","currency":"BOB"}}`, más las fechas del pago.
+- 400 para ID inválido, 401 para JWT inválido o ausente, 403 para rol no autorizado, 404 para pago inexistente o ajeno y 503 ante error de consulta.
+
+Reutiliza `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`, `SUBSCRIPTION_PRO_BOB` y `SUBSCRIPTION_ENTERPRISE_BOB` desde `c.env` (bindings locales en DEV). El montaje no requiere SQL, jobs nuevos ni cambios a QR scan/pay de Solari. Astro consume las dos rutas desde el BFF. Para revertir, quitar el montaje en `src/index.ts`.
+
+```sh
+pnpm dev --port 8791
+curl -i http://localhost:8791/api/subscriptions/me
+curl -i -H 'Authorization: Bearer <JWT_B2B>' http://localhost:8791/api/subscriptions/me
+curl -i -H 'Authorization: Bearer <JWT_B2B>' http://localhost:8791/api/subscriptions/payments/<ID_PAGO>
+```
+
+Esperar 401 sin JWT, 200 con comercio autorizado, 403 con B2C y 404 al usar un ID de otra tienda. Repetir después de acreditar un QR DEV y verificar plan y fechas. El tipo de MS6 pasó con `pnpm exec tsc --noEmit`. La prueba con Solari y Supabase queda pendiente.
+## Entrega B · Guarda de liquidación automática
+
+`src/routes/internal.routes.ts` y `src/types/index.ts` incorporan `ESCROW_AUTO_SETTLEMENT_VERIFIED` como binding privado opcional de Wrangler (`c.env`). POST `/api/internal/escrow/process-settlements` mantiene `X-Internal-Key` con `PAYMENTS_INTERNAL_KEY` y no requiere cuerpo. Con el binding ausente o distinto de `true`, devuelve 503 y `{"success":false,"error":"Liquidación automática deshabilitada"}` antes de acceder a la base. Cuando se autorice, conserva el contrato `{success:true,settled:number}`.
+
+Mantener desactivado en DEV mientras el evento legado de llegada pueda iniciar el temporizador. Supervisar los 503 del job. El cambio no modifica las RPC, el ledger, QR Solari, las rutas de resolución manual ni las reservas. No requiere migración. Para revertir, restaurar los dos archivos fuente. Validar en DEV con `pnpm dev` y `curl -i -X POST -H 'X-Internal-Key: <CLAVE_DEV>' http://localhost:8791/api/internal/escrow/process-settlements`. Un 503 confirma la guarda sin intentar liquidación. La aceptación financiera queda pendiente.
+## C1 · Guardias financieras
+
+`src/middleware/auth.ts` exige emisor MS1 y expiración. `src/routes/qr.routes.ts` rechaza Enterprise y campos ajenos a la solicitud, y mantiene el cobro PRO cerrado con 503 hasta verificar la RPC de abono. `src/routes/subscriptions.routes.ts` expone Bs 59 solo si `SUBSCRIPTION_PRO_BOB=59` y omite tarifa Enterprise. Configurar `PLATFORM_BANK_ACCOUNT_ID` y el precio únicamente como bindings privados MS6. La validación sintáctica del UUID no acredita titularidad. `src/routes/bank.routes.ts` rechaza recarga, pago QR y transferencias públicas que involucren la tesorería según el endpoint.
+
+QR de pedidos exige `ORDER_ESCROW_ATOMIC_VERIFIED=true` para generar o cobrar. Mantenerlo ausente. El pago público ya no intenta insertar escrow después del débito. Si el RPC no dejó la fila, la API devuelve 503 `ESCROW_PENDING_RECONCILIATION`. El reparador interno de pagos ya registrados conserva su ruta. Antes de habilitar, auditar el SQL vivo, locks, deduplicación y el outbox con una caída de MS4.
+
+`src/routes/escrow.routes.ts` rechaza POST `/api/escrow/settle` con 403 y POST `/api/escrow/bind-qr` con 503, aun con sesión válida. GET de detalle conserva el filtro de propietario. `src/routes/internal.routes.ts` rechaza llegada con 503 y solo admite acción `FREEZE` en disputa. Mantener `ESCROW_AUTO_SETTLEMENT_VERIFIED` desactivado. No hay cambios a ledger, RPC ni cron en esta entrega. No se aprobó ninguna liberación o devolución.
+
+Pruebas locales: `pnpm exec tsc --noEmit`, `pnpm exec wrangler deploy --dry-run`, `pnpm exec node --env-file=.dev.vars --test tests/c1-guards.test.mjs`. El último comando requiere MS6 local con la versión C1 y no usa PIN ni hace transferencias. El rollback se realiza revirtiendo los archivos fuente y bindings de esta sección tras revisar las implicaciones de reabrir rutas de mutación.

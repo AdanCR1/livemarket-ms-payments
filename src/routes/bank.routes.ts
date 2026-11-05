@@ -169,6 +169,9 @@ bankRoutes.post(
         if (!acc) {
             return c.json({ success: false, error: 'Cuenta no encontrada' }, 404);
         }
+        if (acc.id.toLowerCase() === c.env.PLATFORM_BANK_ACCOUNT_ID?.trim().toLowerCase()) {
+            return c.json({ success: false, error: 'La tesorería no admite recargas públicas' }, 403);
+        }
 
         const { data, error } = await supabase.rpc('credit_demo_balance', {
             p_account_id: acc.id,
@@ -210,6 +213,10 @@ bankRoutes.post(
     if (!sourceAcc) {
       return c.json({ success: false, error: 'No tienes una cuenta bancaria asignada' }, 404);
     }
+    const treasury = c.env.PLATFORM_BANK_ACCOUNT_ID?.trim().toLowerCase();
+    if (sourceAcc.id.toLowerCase() === treasury || target_account_id.toLowerCase() === treasury) {
+      return c.json({ success: false, error: 'La tesorería no admite transferencias públicas' }, 403);
+    }
 
     // 2. Verificar cuenta destino
     const { data: targetAcc } = await supabase
@@ -226,50 +233,24 @@ bankRoutes.post(
       return c.json({ success: false, error: 'No puedes transferir a tu propia cuenta' }, 400);
     }
 
-    if (sourceAcc.balance < amount) {
-      return c.json({ success: false, error: 'Fondos insuficientes' }, 400);
+
+    // 3. La transferencia completa y ambos asientos ocurren en una sola transacción.
+    // Aceptar clave opcional UUID para reintentos seguros; Solari actual no necesita enviarla.
+    const operationKey = c.req.header('Idempotency-Key') || crypto.randomUUID();
+    if (!/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(operationKey)) {
+      return c.json({success:false,error:'Idempotency-Key inválida'},400);
     }
-
-    // 3. Ejecutar transferencia atómica: debitar origen y acreditar destino
-    const newSourceBalance = Number(sourceAcc.balance) - amount;
-    const newTargetBalance = Number(targetAcc.balance) + amount;
-
-    await supabase
-      .from('bank_accounts')
-      .update({ balance: newSourceBalance })
-      .eq('id', sourceAcc.id);
-
-    await supabase
-      .from('bank_accounts')
-      .update({ balance: newTargetBalance })
-      .eq('id', targetAcc.id);
-
-    // Registrar en Ledger
-    await supabase.from('bank_transactions').insert([
-      {
-        account_id: sourceAcc.id,
-        tx_type: 'PURCHASE_PAYMENT',
-        amount,
-        balance_after: newSourceBalance,
-        description: `Transferencia Simple QR a cuenta ${targetAcc.account_number}`,
-      },
-      {
-        account_id: targetAcc.id,
-        tx_type: 'DEPOSIT',
-        amount,
-        balance_after: newTargetBalance,
-        description: `Transferencia Simple QR recibida de ${sourceAcc.account_number}`,
-      },
-    ]);
-
-    return c.json({
-      success: true,
-      data: {
-        amount,
-        balance_remaining: newSourceBalance,
-        target_account: targetAcc.account_number,
-      },
+    const {data:result,error:txError}=await supabase.rpc('ms6_transfer_direct',{
+      p_source_id:sourceAcc.id,p_target_id:targetAcc.id,p_amount:amount,
+      p_pin:pin,p_operation_key:operationKey,
     });
+    if(txError || !result?.success) {
+      return c.json({success:false,error:txError?.message||result?.code||'Transferencia rechazada'},400);
+    }
+    return c.json({success:true,data:{amount:result.amount ?? amount,
+      balance_remaining:result.balance_remaining ?? null,
+      target_account:result.target_account ?? targetAcc.account_number,
+      replayed:result.replayed??false}});
   }
 );
 

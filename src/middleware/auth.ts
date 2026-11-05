@@ -14,7 +14,9 @@ export const auth = createMiddleware<AppContext>(async (c, next) => {
     const payload = (await verify(token, c.env.JWT_SECRET, 'HS256')) as Record<string, unknown>;
 
     const role = payload.role as string;
-    if (typeof payload.sub !== 'string' || !['B2C', 'B2B', 'DRIVER'].includes(role)) {
+    if (payload.iss !== 'ms1-auth' || typeof payload.exp !== 'number' ||
+        payload.exp <= Date.now() / 1000 || typeof payload.sub !== 'string' ||
+        !['B2C', 'B2B', 'DRIVER'].includes(role)) {
       return c.json({ success: false, error: 'Claims de token inválidos' }, 401);
     }
 
