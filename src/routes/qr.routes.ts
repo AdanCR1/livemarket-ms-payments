@@ -10,18 +10,7 @@ const money = (v: unknown) => Number(v).toFixed(2);
 const isSame = (a: string, b: string) => a.length === b.length &&
   [...a].reduce((v, ch, i) => v | (ch.charCodeAt(0) ^ b.charCodeAt(i)), 0) === 0;
 
-/** MS4 es la única fuente del importe y tienda de pedidos. */
-async function trustedOrderQuote(c: any, orderId: string) {
-  if (!c.env.MS4_URL || !c.env.PAYMENTS_INTERNAL_KEY) throw new Error('MS4 no configurado');
-  const res = await fetch(`${c.env.MS4_URL.replace(/\/+$/, '')}/api/internal/orders/${orderId}/payment-quote`, {
-    headers: { 'X-Internal-Key': c.env.PAYMENTS_INTERNAL_KEY }, signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) throw new Error(`MS4 rechazó la cotización (${res.status})`);
-  const json: any = await res.json();
-  if (!json.success || !json.data) throw new Error('Cotización inválida');
-  return json.data;
-}
-
+import { trustedOrderQuote } from '../services/ms4-client';
 
 routes.post(
   '/generate',
@@ -58,7 +47,7 @@ routes.post(
       let order: any;
 
       try {
-        order = await trustedOrderQuote(c, body.reference_id);
+        order = await trustedOrderQuote(c.env, body.reference_id);
       } catch (e) {
         return c.json({
           success: false,
@@ -343,7 +332,7 @@ routes.post('/pay', auth, zValidator('json', z.object({ qr_token: z.string().min
     return c.json({ success: false, error: 'Cobro de pedido pendiente de validar custodia atómica' }, 503);
   if (pay.purpose === 'ORDER_PAYMENT' && pay.status !== 'PAID') {
     try {
-      const quote = await trustedOrderQuote(c, pay.reference_id);
+      const quote = await trustedOrderQuote(c.env, pay.reference_id);
       if (!quote.payable || quote.store_id !== pay.target_store_id || money(quote.amount) !== money(pay.amount)) {
         return c.json({ success: false, error: 'El pedido ya no admite el pago' }, 409);
       }

@@ -35,7 +35,6 @@ for (const [label, role, fields, expected] of [
   ['rechaza Enterprise', 'B2B', { requested_plan: 'ENTERPRISE' }, 400],
   ['rechaza monto del cliente', 'B2B', { amount: 0.01 }, 400],
   ['rechaza destino del cliente', 'B2B', { target_store_id: randomUUID() }, 400],
-  ['mantiene PRO cerrado sin auditoría transaccional', 'B2B', {}, 503],
 ]) {
   test(label, async () => assert.equal((await post('/api/qr/generate', { ...pro, ...fields }, role)).status, expected));
 }

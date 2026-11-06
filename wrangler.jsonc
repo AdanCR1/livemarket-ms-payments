@@ -3,7 +3,7 @@
   "name": "livemarket-ms-payments",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-30",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "vars": {
     "MS1_URL": "https://livemarket-ms-auth.jasoncortezreyes.workers.dev",
     "MS4_URL": "https://livemarket-ms-logistic.soportenonis.workers.dev"

@@ -1,6 +1,5 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logger } from 'hono/logger';
 import type { AppContext } from './types';
 
 import bankRoutes from './routes/bank.routes';
@@ -13,7 +12,12 @@ import subscriptionRoutes from './routes/subscriptions.routes';
 
 const app = new Hono<AppContext>();
 
-app.use('*', logger());
+app.use('*', async (c, next) => {
+  const started = Date.now();
+  await next();
+  console.info({ component: 'MS6_HTTP', method: c.req.method, route: c.req.routePath,
+    status: c.res.status, elapsedMs: Date.now() - started });
+});
 app.use('*', cors());
 
 app.get('/health', (c) => c.json({

@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { createSupabaseAdmin } from '../utils/supabase';
 import type { AppContext } from '../types';
+import { processPaymentOutbox } from '../services/payment-outbox';
+import { trustedOrderQuote } from '../services/ms4-client';
 
 const internalRoutes = new Hono<AppContext>();
 
@@ -26,33 +28,9 @@ internalRoutes.post('/expire', async (c) => {
 });
 
 // ─── POST /process-outbox (claim atómico, sin envíos duplicados en paralelo) ───
-internalRoutes.post('/process-outbox',async c=>{
- const supabase=createSupabaseAdmin(c.env);
- const {data:events,error:claimError}=await supabase.rpc('ms6_claim_payment_events',{p_limit:20});
- if(claimError)return c.json({success:false,error:'No se pudo reclamar outbox'},500);
- let sent=0,failed=0;
- for(const ev of events??[]){
-   let ok=false;let lastError='';
-   try{
-     // MS1 queda pendiente hasta integrar un endpoint autenticado para SUBSCRIPTION_CHANGED.
-     if(ev.destination==='MS4' && ev.event_type==='PAYMENT_SUCCEEDED'){
-       // Nunca confirmar pedido si el pago aún carece de custodia.
-       const {data:escrow}=await supabase.from('escrow_settlements').select('id')
-         .eq('payment_id',ev.aggregate_id).maybeSingle();
-       if(!escrow) throw new Error('ESCROW_PENDING_RECONCILIATION');
-       const r=await fetch(`${c.env.MS4_URL.replace(/\/+$/,'')}/api/internal/payments/events`,{
-         method:'POST',headers:{'Content-Type':'application/json','X-Internal-Key':c.env.PAYMENTS_INTERNAL_KEY},
-         body:JSON.stringify(ev.payload),signal:AbortSignal.timeout(8000)
-       });ok=r.ok; if(!ok)lastError=`MS4 HTTP ${r.status}`;
-     } else lastError=`Destino no configurado: ${ev.destination}/${ev.event_type}`;
-   }catch(e){lastError=e instanceof Error?e.message:'Error de red';}
-   const {error:ackError}=await supabase.rpc('ms6_ack_payment_event',{
-     p_event_id:ev.id,p_success:ok,p_error:lastError
-   });
-   if(ackError)console.error('No fue posible confirmar evento',ev.id);
-   if(ok)sent++;else failed++;
- }
- return c.json({success:true,claimed:(events??[]).length,sent,failed});
+internalRoutes.post('/process-outbox', async c => {
+  const result = await processPaymentOutbox(c.env);
+  return c.json(result, result.success ? 200 : 503);
 });
 
 // Repara pagos ya procesados que quedaron sin escrow por caída tras el RPC.
@@ -72,10 +50,8 @@ internalRoutes.post('/escrow/reconcile-paid',async c=>{
   // La identidad del comprador se consulta en MS4; puede ser distinta del pagador.
   let customerId:string|null=null;
   try {
-    const response=await fetch(`${c.env.MS4_URL.replace(/\/+$/,'')}/api/internal/orders/${p.reference_id}/payment-quote`,{
-      headers:{'X-Internal-Key':c.env.PAYMENTS_INTERNAL_KEY},signal:AbortSignal.timeout(8000)
-    });
-    if(response.ok){const quote:any=await response.json(); customerId=quote?.data?.customer_id??null;}
+    const quote = await trustedOrderQuote(c.env,p.reference_id);
+    customerId = quote.customer_id;
   }catch{ /* reintento programado */ }
   if(!customerId){failed++;continue;}
   const {error:insertError}=await supabase.from('escrow_settlements').insert({
