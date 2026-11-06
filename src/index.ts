@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { AppContext } from './types';
+import { dispatchPaymentOutbox } from './services/payment-outbox';
+import type { Env } from './types';
 
 import bankRoutes from './routes/bank.routes';
 import qrRoutes from './routes/qr.routes';
@@ -10,7 +12,7 @@ import planCheckRoutes from './routes/plan-check.routes';
 import profileRoutes from './routes/profile.routes';
 import subscriptionRoutes from './routes/subscriptions.routes';
 
-const app = new Hono<AppContext>();
+export const app = new Hono<AppContext>();
 
 app.use('*', async (c, next) => {
   const started = Date.now();
@@ -40,4 +42,9 @@ app.onError((err, c) => {
   return c.json({ success: false, error: 'Error interno del servidor de pagos' }, 500);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled(_event: unknown, env: Env, ctx: {waitUntil(promise:Promise<unknown>):void}) {
+    ctx.waitUntil(dispatchPaymentOutbox(env));
+  },
+};

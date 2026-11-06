@@ -24,10 +24,11 @@ for (const scenario of ['sent','logical-failure','ack-failure','no-escrow','bad-
     let ack;
     t.mock.method(globalThis,'fetch',async (url, options) => {
       const path = new URL(url).pathname;
-      if(path.endsWith('/rpc/ms6_claim_payment_events_v2'))
+      if(path.endsWith('/rpc/ms6_claim_order_payment_events_v3'))
         return Response.json([{...event,payload:scenario==='bad-payload'?{...payload,amount:'bad'}:payload}]);
+      if(path.endsWith('/payments')) return Response.json({id:payload.payment_id,purpose:'ORDER_PAYMENT',reference_id:payload.order_id,target_store_id:crypto.randomUUID(),amount:20,currency:'BOB',status:'PAID',paid_at:'2026-11-06T03:39:43Z'});
       if(path.endsWith('/escrow_settlements'))
-        return Response.json(scenario==='no-escrow'?[]:[{id:crypto.randomUUID()}]);
+        return Response.json(scenario==='no-escrow'?null:{id:crypto.randomUUID()});
       if(path.endsWith('/api/internal/payments/events')) {
         sends++;
         assert.equal(options.headers['X-Internal-Key'],env.PAYMENTS_INTERNAL_KEY);

@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { dispatchPaymentOutbox } from '../services/payment-outbox';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { auth } from '../middleware/auth';
@@ -343,6 +344,8 @@ routes.post('/pay', auth, zValidator('json', z.object({ qr_token: z.string().min
   const { data, error } = await db.rpc('execute_qr_payment', { p_qr_token_hash: hash, p_account_id: acc.id, p_pin: pin });
   if (error) return c.json({ success: false, error: 'Error al procesar pago' }, 400);
   if (!data?.success) return c.json({ success: false, code: data?.code || 'PAYMENT_FAILED' }, 400);
+  if (pay.purpose === 'ORDER_PAYMENT')
+    c.executionCtx.waitUntil(dispatchPaymentOutbox(c.env,{payment_id:pay.id}));
   if (pay.purpose === 'ORDER_PAYMENT') {
     const { data: escrow, error: escrowError } = await db.from('escrow_settlements')
       .select('id').eq('payment_id', pay.id).maybeSingle();

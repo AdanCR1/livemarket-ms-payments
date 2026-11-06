@@ -3,6 +3,8 @@ import { createSupabaseAdmin } from '../utils/supabase';
 import type { AppContext } from '../types';
 import { processPaymentOutbox } from '../services/payment-outbox';
 import { trustedOrderQuote } from '../services/ms4-client';
+import { persistedPayment } from '../services/payment-proof';
+import { z } from 'zod';
 
 const internalRoutes = new Hono<AppContext>();
 
@@ -29,8 +31,19 @@ internalRoutes.post('/expire', async (c) => {
 
 // ─── POST /process-outbox (claim atómico, sin envíos duplicados en paralelo) ───
 internalRoutes.post('/process-outbox', async c => {
-  const result = await processPaymentOutbox(c.env);
+  const text = await c.req.text();
+  let body;
+  try { body = text ? JSON.parse(text) : {}; } catch { return c.json({success:false},400); }
+  const parsed=z.object({payment_id:z.string().uuid().optional(),outbox_id:z.string().uuid().optional()}).strict().safeParse(body);
+  if(!parsed.success || (parsed.data.payment_id && parsed.data.outbox_id))return c.json({success:false},400);
+  const result = await processPaymentOutbox(c.env,parsed.data);
   return c.json(result, result.success ? 200 : 503);
+});
+
+internalRoutes.get('/payments/:id/proof',async c=>{
+  if(!z.string().uuid().safeParse(c.req.param('id')).success)return c.json({success:false},400);
+  try{return c.json({success:true,data:await persistedPayment(c.env,c.req.param('id'))});}
+  catch{return c.json({success:false,code:'PAYMENT_PROOF_UNAVAILABLE'},503);}
 });
 
 // Repara pagos ya procesados que quedaron sin escrow por caída tras el RPC.

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import app from '../src/index.ts';
+import { app } from '../src/index.ts';
 
 test('los logs de escaneo usan la plantilla de ruta y omiten token y query', async t => {
   const records=[];

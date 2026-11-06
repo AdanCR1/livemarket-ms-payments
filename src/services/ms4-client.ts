@@ -29,7 +29,9 @@ export async function callMS4(env: Env, path: string, method: 'GET' | 'POST' = '
   if (!response.ok || result?.success !== true) {
     console.warn({ component: 'MS6_MS4', host: base.host, status: response.status,
       elapsedMs: Date.now() - started, cloudflareCode: /error code:\s*(\d{4})/i.exec(text)?.[1] ?? null });
-    throw new Error('MS4_HTTP_' + response.status);
+    const code = typeof result?.code === 'string' && /^[A-Z0-9_]{1,80}$/.test(result.code)
+      ? result.code : 'MS4_HTTP_' + response.status;
+    throw new Error(code);
   }
   return result;
 }
